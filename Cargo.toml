@@ -1,0 +1,21 @@
+[package]
+name = "airfill"
+version = "0.1.0"
+edition = "2021"
+description = "Fills the highs a lossy codec cut off, from the music under the cut (no neural networks)"
+license = "MIT"
+authors = ["RedMoth"]
+repository = "https://github.com/LicaRedMoth/airfill"
+readme = "README.md"
+keywords = ["audio", "mp3", "bandwidth-extension", "dsp", "flac"]
+categories = ["multimedia::audio", "command-line-utilities"]
+exclude = ["bench/", "fuzz/"]
+
+[dependencies]
+realfft = "3"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,0 +1,8 @@
+# cargo deny check: every dependency must allow use in an MIT project
+[licenses]
+allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
+
+[bans]
+multiple-versions = "warn"
+
+[advisories]

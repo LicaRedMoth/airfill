@@ -1,0 +1,12 @@
+/target
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage
+/bench/corpus
+/bench/*.csv
+/bench/*.txt
+/bench/*.log
+/bench/*.err
+/bench/*.png
+/bench/__pycache__
