@@ -4,6 +4,7 @@
 set -euo pipefail
 
 hours="${1:-6}"
+shift || true
 export DEBIAN_FRONTEND=noninteractive
 
 if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v clang >/dev/null 2>&1; then
@@ -25,4 +26,4 @@ cargo +nightly miri setup
 cargo +nightly miri test
 bash fuzz/make_seeds.sh
 cargo +nightly fuzz run engine fuzz/corpus/engine -- \
-    -max_total_time=$((hours * 3600)) -max_len=600000 -rss_limit_mb=3000
+    -max_total_time=$((hours * 3600)) -max_len=600000 -rss_limit_mb=3000 "$@"
