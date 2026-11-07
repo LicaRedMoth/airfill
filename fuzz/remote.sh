@@ -5,9 +5,9 @@ set -euo pipefail
 
 hours="${1:-6}"
 
-if ! command -v ffmpeg >/dev/null 2>&1; then
+if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v clang >/dev/null 2>&1; then
     apt-get update -qq
-    apt-get install -y -qq ffmpeg
+    apt-get install -y -qq ffmpeg clang
 fi
 if ! command -v cargo >/dev/null 2>&1; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain nightly
