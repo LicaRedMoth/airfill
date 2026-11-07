@@ -25,5 +25,24 @@ cargo test --release
 cargo +nightly miri setup
 cargo +nightly miri test
 bash fuzz/make_seeds.sh
+monitor_pid=
+if [ "${MONITOR:-0}" = 1 ]; then
+    (
+        while true; do
+            sleep 60
+            for f in fuzz-*.log; do
+                [ -f "$f" ] || continue
+                echo "== $f =="
+                tail -n 1 "$f"
+            done
+        done
+    ) &
+    monitor_pid=$!
+fi
+status=0
 cargo +nightly fuzz run engine fuzz/corpus/engine -- \
-    -max_total_time=$((hours * 3600)) -max_len=600000 -rss_limit_mb=3000 "$@"
+    -max_total_time=$((hours * 3600)) -max_len=600000 -rss_limit_mb=3000 "$@" || status=$?
+if [ -n "$monitor_pid" ]; then
+    kill "$monitor_pid" 2>/dev/null || true
+fi
+exit "$status"
