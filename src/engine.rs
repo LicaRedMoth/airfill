@@ -708,6 +708,13 @@ pub fn airfill(x: &[Vec<f32>], sr: f64, s: &Settings) -> (Vec<Vec<f32>>, Report)
     airfill_with_progress(x, sr, s, &mut |_| {})
 }
 
+/// Core and context of an internal block, rounded to whole STFT hops: blocks then start on the
+/// same frame grid, so the fill keeps its phase across a seam and the crossfade cannot cancel it.
+fn block_layout(sr: f64, chunk_s: f64, context_s: f64) -> (usize, usize) {
+    let hops = |seconds: f64| (seconds * sr / HOP as f64).round().max(0.0) as usize;
+    (hops(chunk_s).max(1) * HOP, hops(context_s) * HOP)
+}
+
 /// The same, calling `progress` with the share done as the work goes.
 pub fn airfill_with_progress(
     x: &[Vec<f32>],
@@ -716,8 +723,7 @@ pub fn airfill_with_progress(
     progress: &mut dyn FnMut(f64),
 ) -> (Vec<Vec<f32>>, Report) {
     let n = x[0].len();
-    let core = (s.chunk_s * sr) as usize;
-    let ctx = (s.context_s * sr) as usize;
+    let (core, ctx) = block_layout(sr, s.chunk_s, s.context_s);
     let fade = s.fade_s * sr;
     progress(0.0);
     if n <= core + 2 * ctx {
@@ -781,5 +787,14 @@ mod tests {
         assert_eq!(round_even(3.5), 4);
         assert_eq!(round_even(937.5), 938);
         assert_eq!(round_even(86.13), 86);
+    }
+
+    #[test]
+    fn blocks_start_on_the_stft_hop_grid() {
+        for sr in [22050.0, 44100.0, 48000.0, 96000.0] {
+            let (core, ctx) = block_layout(sr, 60.0, 15.0);
+            assert_eq!(core % HOP, 0, "core at {sr}");
+            assert_eq!(ctx % HOP, 0, "context at {sr}");
+        }
     }
 }
