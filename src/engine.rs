@@ -74,6 +74,8 @@ pub struct Settings {
     pub flat_from: f64,
     pub flat_to: f64,
     pub flat_s: f64,
+    /// Collect per-frame decisions into `Report::trace` (off by default; costs a second line fit).
+    pub trace: bool,
 }
 
 impl Default for Settings {
@@ -118,6 +120,7 @@ impl Default for Settings {
             flat_from: 1.4,
             flat_to: 2.0,
             flat_s: 60.0,
+            trace: false,
         }
     }
 }
@@ -125,6 +128,28 @@ impl Default for Settings {
 pub struct Report {
     pub filled_share: f64,
     pub cut_median_hz: Option<f64>,
+    pub trace: Vec<TraceFrame>,
+}
+
+/// One STFT frame of the decisions, for `--log`. Times are seconds from the start of the input.
+#[derive(Clone, Debug)]
+pub struct TraceFrame {
+    pub block: usize,
+    pub in_core: bool,
+    pub time: f64,
+    pub cut_hz: f64,
+    pub reference_hz: f64,
+    pub strength: f64,
+    pub slope_db_oct: f64,
+    pub anchor_db: f64,
+    pub slope_long_db_oct: f64,
+    pub anchor_long_db: f64,
+    pub flat_corr_db: f64,
+    pub line_8k_db: f64,
+    pub line_12k_db: f64,
+    pub line_16k_db: f64,
+    pub side_cut_hz: f64,
+    pub side_strength: f64,
 }
 
 /// Round with halves to the even neighbour, the rule the frame counts were tuned with.
@@ -301,6 +326,8 @@ struct Line {
     anchor_f: Vec<f64>,
     slope_long: Vec<f64>,
     anchor_long: Vec<f64>,
+    reference: Vec<f64>,
+    flat_corr: Vec<f64>,
 }
 
 /// Slope from a time-smoothed spectrum, anchor level and frequency from the frame itself.
@@ -381,11 +408,13 @@ fn line_params(p: &Grid<f32>, fr: &[f64], sr: f64, cut: &[f64], s: &Settings) ->
     let plain = anchor.clone();
 
     // a noisy anchor band (sibilants, shakers) lifted the fill more than real highs rise
+    let mut flat_corr = vec![0.0; frames];
     if s.flat_comp_db > 0.0 {
         let flat = mean_1d(&flat, frames_of(0.5, sr));
         let usual = median_1d(&flat, ref_span);
         for t in 0..frames {
-            anchor[t] -= s.flat_comp_db * (flat[t] - usual[t]);
+            flat_corr[t] = -s.flat_comp_db * (flat[t] - usual[t]);
+            anchor[t] += flat_corr[t];
         }
     }
 
@@ -412,7 +441,20 @@ fn line_params(p: &Grid<f32>, fr: &[f64], sr: f64, cut: &[f64], s: &Settings) ->
     } else {
         (slope.clone(), anchor.clone())
     };
-    Line { slope, anchor, anchor_f, slope_long, anchor_long }
+    Line { slope, anchor, anchor_f, slope_long, anchor_long, reference, flat_corr }
+}
+
+/// Line level at `f` for frame `t`, before the tilt and the bend: the part the trace reports.
+fn line_level(line: &Line, f: f64, cut: f64, t: usize, s: &Settings) -> f64 {
+    let w = if s.flat_to > s.flat_from {
+        let r = ((f / cut - s.flat_from) / (s.flat_to - s.flat_from)).clamp(0.0, 1.0);
+        0.5 - 0.5 * (std::f64::consts::PI * r).cos()
+    } else {
+        0.0
+    };
+    let anchor = line.anchor[t] + w * (line.anchor_long[t] - line.anchor[t]);
+    let slope = line.slope[t] + w * (line.slope_long[t] - line.slope[t]);
+    anchor + slope * (f.max(1.0).log2() - line.anchor_f[t].log2())
 }
 
 fn pearson(a: &[f32], b: &[f32]) -> f64 {
@@ -477,22 +519,13 @@ fn fill_channel(
         }
         let cut_bin = (fr.len() - 1).min((cut[t] / df) as usize);
         let log_cut = cut[t].log2();
-        let log_anchor = line.anchor_f[t].log2();
 
         let mut want = Vec::with_capacity(b1 - b0 + 1);
         for b in b0..=b1 {
             // the bend counts from the cut, so the fill starts level with what is under it
             let bend = (extra[b] - extra[cut_bin]).min(0.0);
             let tilt = s.tilt_db_oct * (logf[b] - log_cut).max(0.0);
-            let w = if s.flat_to > s.flat_from {
-                let r = ((fr[b] / cut[t] - s.flat_from) / (s.flat_to - s.flat_from)).clamp(0.0, 1.0);
-                0.5 - 0.5 * (std::f64::consts::PI * r).cos()
-            } else {
-                0.0
-            };
-            let anchor = line.anchor[t] + w * (line.anchor_long[t] - line.anchor[t]);
-            let slope = line.slope[t] + w * (line.slope_long[t] - line.slope[t]);
-            let level = anchor + slope * (logf[b] - log_anchor) + s.level_db + bend + tilt;
+            let level = line_level(&line, fr[b], cut[t], t, s) + s.level_db + bend + tilt;
             let missing = (10f64.powf(level / 10.0) - have.at(b, t) as f64).max(0.0);
             want.push(missing * strength[t] * top[b] * top[b]);
         }
@@ -603,7 +636,13 @@ fn side_gain(new: &[Grid<Complex32>], gain: &[f64], span: usize) -> Vec<Grid<Com
 /// The signal to add to one block (channels of samples), and its report.
 /// Joint stereo often cuts the side lower than the mid: fill the side from its own cut up to
 /// the mid cut, where the stereo fill takes over.
-fn side_gap(z: &[Grid<Complex32>], fr: &[f64], sr: f64, cut: &[f64], s: &Settings) -> Grid<Complex32> {
+fn side_gap(
+    z: &[Grid<Complex32>],
+    fr: &[f64],
+    sr: f64,
+    cut: &[f64],
+    s: &Settings,
+) -> (Grid<Complex32>, Vec<f64>, Vec<f64>) {
     let mut side = z[0].clone();
     for (v, r) in side.data.iter_mut().zip(&z[1].data) {
         *v = (*v - r) * 0.5;
@@ -634,11 +673,17 @@ fn side_gap(z: &[Grid<Complex32>], fr: &[f64], sr: f64, cut: &[f64], s: &Setting
             }
         }
     }
-    fill
+    (fill, side_cut, strength)
 }
 
 /// Fill one block; `done` gets the share of the block finished, at stages weighed by their time.
-fn fill_block(x: &[Vec<f32>], sr: f64, s: &Settings, done: &mut dyn FnMut(f64)) -> (Vec<Vec<f32>>, Report) {
+fn fill_block(
+    x: &[Vec<f32>],
+    sr: f64,
+    s: &Settings,
+    start_sample: usize,
+    done: &mut dyn FnMut(f64),
+) -> (Vec<Vec<f32>>, Report) {
     let samples = x[0].len();
     let fr: Vec<f64> = (0..BINS).map(|b| b as f64 * sr / NFFT as f64).collect();
     let mut stft = Stft::new();
@@ -654,11 +699,35 @@ fn fill_block(x: &[Vec<f32>], sr: f64, s: &Settings, done: &mut dyn FnMut(f64)) 
     let (cut, strength) = cut_track(&p, &fr, sr, s);
     done(0.27);
 
+    let line = if s.trace { Some(line_params(&z[0].map(|v| v.norm_sqr()), &fr, sr, &cut, s)) } else { None };
     let filled: Vec<f64> = cut.iter().zip(&strength).filter(|(_, st)| **st > 0.0).map(|(c, _)| *c).collect();
-    let report = Report {
+    let mut report = Report {
         filled_share: filled.len() as f64 / cut.len() as f64,
         cut_median_hz: if filled.is_empty() { None } else { Some(median(&filled)) },
+        trace: Vec::new(),
     };
+    if let Some(line) = &line {
+        report.trace = (0..cut.len())
+            .map(|t| TraceFrame {
+                block: 0,
+                in_core: true,
+                time: (start_sample + t * HOP) as f64 / sr,
+                cut_hz: cut[t],
+                reference_hz: line.reference[t],
+                strength: strength[t],
+                slope_db_oct: line.slope[t],
+                anchor_db: line.anchor[t],
+                slope_long_db_oct: line.slope_long[t],
+                anchor_long_db: line.anchor_long[t],
+                flat_corr_db: line.flat_corr[t],
+                line_8k_db: line_level(line, 8000.0, cut[t], t, s),
+                line_12k_db: line_level(line, 12000.0, cut[t], t, s),
+                line_16k_db: line_level(line, 16000.0, cut[t], t, s),
+                side_cut_hz: f64::NAN,
+                side_strength: f64::NAN,
+            })
+            .collect();
+    }
     if filled.is_empty() {
         done(1.0);
         return (vec![vec![0.0; samples]; x.len()], report);
@@ -689,10 +758,16 @@ fn fill_block(x: &[Vec<f32>], sr: f64, s: &Settings, done: &mut dyn FnMut(f64)) 
     }
     done(0.68);
     if x.len() == 2 && s.side_min < 1.0 {
-        let side = side_gap(&z, &fr, sr, &cut, s);
+        let (side, side_cut, side_strength) = side_gap(&z, &fr, sr, &cut, s);
         for (i, v) in side.data.iter().enumerate() {
             new[0].data[i] += v;
             new[1].data[i] -= v;
+        }
+        if s.trace {
+            for (row, (&sc, &ss)) in report.trace.iter_mut().zip(side_cut.iter().zip(&side_strength)) {
+                row.side_cut_hz = sc;
+                row.side_strength = ss;
+            }
         }
     }
 
@@ -727,7 +802,7 @@ pub fn airfill_with_progress(
     let fade = s.fade_s * sr;
     progress(0.0);
     if n <= core + 2 * ctx {
-        let (added, report) = fill_block(x, sr, s, progress);
+        let (added, report) = fill_block(x, sr, s, 0, progress);
         let out = x.iter().zip(added).map(|(a, b)| a.iter().zip(b).map(|(u, v)| u + v).collect()).collect();
         return (out, report);
     }
@@ -735,13 +810,21 @@ pub fn airfill_with_progress(
     let mut added = vec![vec![0.0f32; n]; x.len()];
     let mut weight = vec![0.0f32; n];
     let (mut filled, mut cuts) = (0.0, Vec::new());
+    let mut trace = Vec::new();
+    let mut block_index = 0;
     let mut start = 0;
     while start < n {
         let end = (start + core).min(n);
         let (a, b) = (start.saturating_sub(ctx), (end + ctx).min(n));
         let block: Vec<Vec<f32>> = x.iter().map(|ch| ch[a..b].to_vec()).collect();
         let share = |f: f64| (start as f64 + f * (end - start) as f64) / n as f64;
-        let (part, report) = fill_block(&block, sr, s, &mut |f| progress(share(f)));
+        let (part, mut report) = fill_block(&block, sr, s, a, &mut |f| progress(share(f)));
+        for row in &mut report.trace {
+            row.block = block_index;
+            row.in_core = row.time >= start as f64 / sr && row.time < end as f64 / sr;
+        }
+        trace.extend(report.trace);
+        block_index += 1;
 
         // 1 over the core, linear ramps of fade samples centred on its inner edges
         for i in a..b {
@@ -773,6 +856,7 @@ pub fn airfill_with_progress(
     let report = Report {
         filled_share: filled / n as f64,
         cut_median_hz: if cuts.is_empty() { None } else { Some(median(&cuts)) },
+        trace,
     };
     (out, report)
 }
@@ -796,5 +880,16 @@ mod tests {
             assert_eq!(core % HOP, 0, "core at {sr}");
             assert_eq!(ctx % HOP, 0, "context at {sr}");
         }
+    }
+
+    #[test]
+    fn trace_has_one_row_per_frame() {
+        let sr = 48000.0;
+        let n = 24000;
+        let x = vec![vec![0.01f32; n], vec![-0.01f32; n]];
+        let s = Settings { trace: true, ..Settings::default() };
+        let (_, report) = airfill(&x, sr, &s);
+        assert_eq!(report.trace.len(), Stft::frames_for(n));
+        assert!(report.trace.windows(2).all(|w| w[0].time < w[1].time));
     }
 }

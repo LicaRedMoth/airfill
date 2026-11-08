@@ -70,6 +70,15 @@ airfill input.mp3 output.wav --bits 32f
   and with `--rate 96000` airfill treats 24 kHz as the cut and fills up to 48 kHz.
   Everything was tuned and measured up to 20 kHz; above it, trust your ears.
 
+### Debugging
+
+`--log FILE` writes a CSV with one row per STFT frame (about 86 rows per second at 44.1 kHz):
+the detected cut and its smoothed reference, the fill strength, the fitted slope and anchor (and
+their 60 s versions), the flatness correction, the line level at 8, 12 and 16 kHz, and the side
+cut and strength. Rows with `in_core=1` tile the track once; rows from a block's context overlap
+its neighbours, which is useful at block seams. The fill starts at `fit_hi` (0.8) times the cut,
+so `line_*` below that frequency is only the fitted line, not added sound.
+
 ### Level
 
 Some MP3s decode to more than 0 dBFS, and a 16- or 24-bit file would clip those peaks. airfill

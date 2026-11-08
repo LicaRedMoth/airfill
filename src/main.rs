@@ -55,6 +55,9 @@ struct Args {
     /// Read stereo f32le from stdin and write it to stdout (needs --rate); for the benchmark
     #[arg(long)]
     raw: bool,
+    /// Write the per-frame decisions (cut, line, strength, side) as CSV to this file
+    #[arg(long)]
+    log: Option<String>,
 }
 
 fn parse_bits(text: &str) -> Result<Bits, String> {
@@ -76,6 +79,7 @@ fn settings(a: &Args) -> Settings {
         holes_db: a.holes,
         follow: a.follow,
         fall_db_s: a.fall,
+        trace: a.log.is_some(),
         ..Settings::default()
     }
 }
@@ -87,6 +91,7 @@ fn run(a: Args) -> Result<(), String> {
         let x = audio::read_raw()?;
         let (y, report) = engine::airfill(&x, rate as f64, &s);
         eprintln!("{}", summary(&report, &x, &y));
+        write_trace(a.log.as_deref(), &report.trace)?;
         return audio::write_raw(&y);
     }
 
@@ -117,6 +122,7 @@ fn run(a: Args) -> Result<(), String> {
     });
     status("");
     println!("{}", summary(&report, &x, &y));
+    write_trace(a.log.as_deref(), &report.trace)?;
 
     // integer samples clip over 0 dBFS; leave 0.3 dB for the dither and the player
     let peak = audio::peak_db(&y);
@@ -137,6 +143,47 @@ fn run(a: Args) -> Result<(), String> {
     let written = audio::encode(&y, rate, a.bits, a.flac_level, input, output);
     status("");
     written
+}
+
+fn write_trace(path: Option<&str>, trace: &[engine::TraceFrame]) -> Result<(), String> {
+    let Some(path) = path else { return Ok(()) };
+    let file = std::fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
+    let mut out = std::io::BufWriter::new(file);
+    writeln!(out, "# airfill per-frame decisions; side_* are NaN when the side gap is off")
+        .map_err(|e| e.to_string())?;
+    writeln!(
+        out,
+        "block,in_core,time_s,cut_hz,reference_hz,strength,slope_db_oct,anchor_db,\
+         slope_long_db_oct,anchor_long_db,flat_corr_db,line_8k_db,line_12k_db,line_16k_db,\
+         side_cut_hz,side_strength"
+    )
+    .map_err(|e| e.to_string())?;
+    for r in trace {
+        writeln!(
+            out,
+            "{},{},{:.4},{:.1},{:.1},{:.3},{:.4},{:.3},{:.4},{:.3},{:.3},{:.3},{:.3},{:.3},{:.1},{:.3}",
+            r.block,
+            r.in_core as u8,
+            r.time,
+            r.cut_hz,
+            r.reference_hz,
+            r.strength,
+            r.slope_db_oct,
+            r.anchor_db,
+            r.slope_long_db_oct,
+            r.anchor_long_db,
+            r.flat_corr_db,
+            r.line_8k_db,
+            r.line_12k_db,
+            r.line_16k_db,
+            r.side_cut_hz,
+            r.side_strength
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    out.flush().map_err(|e| e.to_string())?;
+    eprintln!("wrote {} frames to {path}", trace.len());
+    Ok(())
 }
 
 const BAR: usize = 28;
