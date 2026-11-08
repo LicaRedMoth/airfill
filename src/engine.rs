@@ -648,6 +648,9 @@ fn side_gap(
         *v = (*v - r) * 0.5;
     }
     let (side_cut, mut strength) = cut_track(&side.map(|v| v.norm_sqr()), fr, sr, s);
+    // the lower edge of the side fill follows the cut; a jumpy cut made it jump too, so use a
+    // 2 s median: the codec's own cut does not move that fast
+    let side_cut = median_1d(&side_cut, odd(frames_of(2.0, sr)));
 
     // a side far under the mid is a near-mono mix, not the codec
     for t in 0..cut.len() {
