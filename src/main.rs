@@ -43,7 +43,7 @@ struct Args {
     /// How much fine structure of the band under the cut the fill copies, 0 (smooth) to 1
     #[arg(long, default_value_t = 0.0)]
     texture: f64,
-    /// Fill spectral holes deeper than this many dB under the cut with noise, 0 = off
+    /// Fill spectral holes deeper than this many dB under the cut with mid noise, 0 = off
     #[arg(long, default_value_t = 15.0)]
     holes: f64,
     /// How much the fill follows the level of the band under the cut, 0..1

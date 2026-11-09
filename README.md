@@ -99,7 +99,7 @@ WAV can not clip, so it is never lowered.
 | `--fill-width DB` | 0 | Side of the fill up or down by this many dB, power kept; 0 leaves it |
 | `--side-min X` | 0.6 | Fill the side from its own cut when the codec cut it lower than the mid, but only when that cut is above this share of the mid cut; 1 turns it off |
 | `--texture X` | 0 | How much fine structure of the band under the cut the fill copies, 0 (smooth) to 1 |
-| `--holes DB` | 15 | Noise into spectral holes under the cut deeper than this; 0 turns it off |
+| `--holes DB` | 15 | Noise into spectral holes under the cut deeper than this, in the mid; 0 turns it off |
 | `--follow X` | 0.7 | How much the fill follows level changes under the cut, 0 to 1 |
 | `--fall DB` | 80 | For cuts under 15 kHz the fill falls by at most this many dB per second; 0 is no limit |
 

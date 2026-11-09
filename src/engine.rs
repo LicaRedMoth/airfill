@@ -50,8 +50,9 @@ pub struct Settings {
     /// stays from frame to frame (tones, codec birdies): gone at texture_stay of correlation.
     pub texture: f64,
     pub texture_stay: f64,
-    /// Spectral holes under the cut (holes_db under the holes_pct percentile of 9 bins x 5 frames,
-    /// from holes_from of the cut up) get noise at holes_level_db, per channel (0 = off).
+    /// Spectral holes under the cut (holes_db under the holes_pct percentile of a 1.5 kHz x 5
+    /// frame window, from holes_from of the cut up) get common noise in both channels at
+    /// holes_level_db, in the mid (0 = off); side holes are left to the side gap.
     pub holes_db: f64,
     pub holes_from: f64,
     pub holes_level_db: f64,
@@ -561,7 +562,47 @@ fn fill_channel(
     new
 }
 
-/// Noise for the spectral holes a low-bitrate codec leaves under its cut, per channel.
+/// One component (mid or side) to scan for the spectral holes a low-bitrate codec leaves below
+/// its cut.
+struct HoleScan<'a> {
+    fr: &'a [f64],
+    cut: &'a [f64],
+    strength: &'a [f64],
+    s: &'a Settings,
+    lo: usize,
+    hi: usize,
+    fbins: usize,
+    rank: usize,
+}
+
+impl HoleScan<'_> {
+    fn noise(&self, zc: &Grid<Complex32>, seed: u64) -> Grid<Complex32> {
+        let level = zc.map(|v| db(v.norm_sqr() as f64 + 1e-20) as f32);
+        let band = rows(&level, self.lo, self.hi);
+        let local = rank_2d(&band, self.fbins, 5, self.rank);
+
+        let mut rng = Rng::new(seed);
+        let mut add = Grid::new(zc.bins, zc.frames, Complex32::new(0.0, 0.0));
+        for t in 0..zc.frames {
+            for j in 0..band.bins {
+                let f = self.fr[self.lo + j];
+                // the generator runs for every bin of the band,
+                // so the noise does not depend on where the holes are
+                let angle = 2.0 * std::f32::consts::PI * rng.next_f32();
+                let inside =
+                    self.strength[t] > 0.0 && f >= self.s.holes_from * self.cut[t] && f < 0.97 * self.cut[t];
+                if inside && band.at(j, t) < local.at(j, t) - self.s.holes_db as f32 {
+                    let amp = 10f32.powf((local.at(j, t) + self.s.holes_level_db as f32) / 20.0);
+                    add.set(self.lo + j, t, Complex32::from_polar(amp, angle));
+                }
+            }
+        }
+        add
+    }
+}
+
+/// Noise for the spectral holes under the cut, in the mid only and common to both channels: noise
+/// in a near-silent side is audible hiss, and the side above its cut is filled by the side gap.
 fn noise_fill(
     z: &[Grid<Complex32>],
     fr: &[f64],
@@ -572,34 +613,30 @@ fn noise_fill(
     let df = fr[1];
     let found: Vec<f64> = cut.iter().zip(strength).filter(|(_, st)| **st > 0.0).map(|(c, _)| *c).collect();
     let usual = median(&found);
-    let lo = ((s.holes_from * usual / df) as isize - 5).max(0) as usize;
-    let hi = ((usual / df) as usize + 5).min(fr.len());
-    let rank = percentile_rank(45, s.holes_pct);
+    // a narrow codec hole fits entirely inside a 9-bin window, so the window never sees the
+    // healthy bands on its sides; 1.5 kHz reaches past a hole about a kHz wide
+    let fbins = (1500.0 / df).round().max(9.0) as usize;
+    let scan = HoleScan {
+        fr,
+        cut,
+        strength,
+        s,
+        lo: ((s.holes_from * usual / df) as isize - 5).max(0) as usize,
+        hi: ((usual / df) as usize + 5).min(fr.len()),
+        fbins,
+        rank: percentile_rank(fbins * 5, s.holes_pct),
+    };
 
-    let mut rng = Rng::new(3);
-    let mut out = Vec::new();
-    for zc in z {
-        let level = zc.map(|v| db(v.norm_sqr() as f64 + 1e-20) as f32);
-        let band = rows(&level, lo, hi);
-        let local = rank_2d(&band, 9, 5, rank);
-
-        let mut add = Grid::new(zc.bins, zc.frames, Complex32::new(0.0, 0.0));
-        for t in 0..zc.frames {
-            for j in 0..band.bins {
-                let f = fr[lo + j];
-                // the generator runs for every bin of the band,
-                // so the noise does not depend on where the holes are
-                let angle = 2.0 * std::f32::consts::PI * rng.next_f32();
-                let inside = strength[t] > 0.0 && f >= s.holes_from * cut[t] && f < 0.97 * cut[t];
-                if inside && band.at(j, t) < local.at(j, t) - s.holes_db as f32 {
-                    let amp = 10f32.powf((local.at(j, t) + s.holes_level_db as f32) / 20.0);
-                    add.set(lo + j, t, Complex32::from_polar(amp, angle));
-                }
-            }
-        }
-        out.push(add);
+    if z.len() != 2 {
+        return z.iter().enumerate().map(|(i, ch)| scan.noise(ch, 3 + i as u64)).collect();
     }
-    out
+
+    let mut mid = Grid::new(z[0].bins, z[0].frames, Complex32::new(0.0, 0.0));
+    for i in 0..mid.data.len() {
+        mid.data[i] = (z[0].data[i] + z[1].data[i]) * 0.5;
+    }
+    let mid_noise = scan.noise(&mid, 3);
+    vec![mid_noise.clone(), mid_noise]
 }
 
 /// Stereo fill with its side scaled by gain (per frame), the power of the fill kept.
